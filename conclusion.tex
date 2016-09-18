@@ -1,0 +1,120 @@
+
+\chapter{Conclusion}
+\label{chapter:conclusion}
+
+Programming modern supercomputers is currently
+a daunting task for even the most expert programmers.
+For application scientists and engineers without
+considerable programming experience, the task will soon
+become completely intractable as machines become increasingly
+complex and heterogeneous. If left unaddressed, this trend
+could potentially stunt the advancement and progress of 
+many areas of science as users are no longer capable of
+fully leveraging the potential of new machines.
+
+Unfortunately, combating this problem cannot be achieved
+by a simple evolution of existing software tools at the
+same level of abstraction. Instead, a new
+approach to supercomputing is necessary
+to raise the level of abstraction and allow software
+systems such as runtimes and compilers to manage the 
+complexity of targeting code to new architectures.
+
+In this thesis we have presented Legion as one possible
+candidate for achieving this end. Legion raises the level
+of abstraction in two ways. First, Legion provides a way
+of decoupling policy decisions from how they are implemented,
+allowing the Legion runtime to manage all of the complexity
+associated with carrying out an implementation. Second,
+Legion provides a programming model that allows applications
+to be specified in a machine-independent manner which 
+decouples how applications are written from how they are
+mapped onto a target machine. Ultimately, this is essential
+for allowing codes to be written once and re-targeted to
+new architectures as hardware changes, thereby ensuring
+that application developers never have to re-write their
+code from scratch when a new machine is released. By exposing
+all performance decisions through the Legion mapping 
+interface, codes can be easily ported without application 
+developers needing to fight the Legion runtime in
+order to control performance.
+
+As we have shown throughout this thesis, the crucial
+innovation that permits Legion to raise the level of 
+abstraction is the introduction of logical regions. Unlike
+most current programming systems, logical regions 
+and operations on them provide a data model for the 
+application to communicate information about the 
+structure of program data to the programming system
+in a machine independent fashion. Specifically logical
+regions support many of the same operations as relations,
+a fundamental data abstraction for many areas of 
+computer science. The relational data model supported
+by logical regions provides a familiar way to describe
+both how data is partitioned and how it is used by
+computations. Furthermore, Legion can leverage its
+knowledge of the structure of program data and how
+computations use it to automatically version it to
+support transparent resiliency and speculation. 
+
+The primary result of this thesis is a demonstration
+of the power that logical regions confer on a programming
+system when used in executing real scientific computing
+applications. Our implementation of Legion illustrates
+that a significant amount of complexity that currently
+burdens application developers can be cleanly encapsulated
+within a reasonable abstraction. While the Legion 
+implementation is non-trivial, with proper software engineering
+techniques it can be maintained by several expert programmers,
+thereby insulating application developers from the complexity
+and allowing them to focus on actual science and research.
+
+To prove that Legion is a real programming system, we ported
+S3D, a full production combustion simulation to use Legion
+and compared it to a highly optimized version of S3D tuned
+independently by experts. Our Legion version is between 2-3X
+faster when run at full scale compared to the baseline on the
+world's number two supercomputer. The relational data model
+supported by logical regions allowed us to express computations
+as tasks that operate over thousands of fields. Furthermore,
+the Legion mapping interface allowed us to experiment with
+many different mapping strategies for different supercomputers
+to discover higher performance versions of the code while
+requiring no changes to the machine-independent specification
+of the application. Our version of Legion S3D is now being
+used for production runs by real combustion scientists
+and may in the immediate future become the canonical version
+of S3D.
+
+In the future we expect to see the evolution of many 
+other programming systems that mirror the characteristics
+of Legion.  We contend that in order to be successful, these
+programming systems will need to have many of the same
+characteristics of Legion.  First, they must be capable of
+expressing codes in a machine-independent manner, and then 
+later mapping the code onto the target machine. Second, they
+should decouple policy from mechanism, thereby allowing
+applications to specify the best way of performing important
+operations such as data partitioning and communication. In
+order to achieve these goals, these programming systems 
+will need to be able to abstract the structure of data in 
+a way that is at least as powerful as the relational data
+model supported by logical regions.
+
+In order to continue to scale applications for modern and
+future supercomputers, a disruptive shift in the way 
+applications are developed is necessary. Raising the level of
+abstraction so that advanced programming systems can hide 
+much of the complexity associated with writing codes for
+target machines will be the only way forward. We believe
+that Legion provides a crucial first look at some of the
+techniques necessary for making this change a reality.
+By already demonstrating considerable improvements over 
+current programming systems when running production 
+codes at scale on modern machines, we have shown that
+the Legion design is a viable way forward. In 
+the future, we anticipate Legion continuing to grow
+and evolve to support additional applications on 
+new architectures, thereby improving the productivity
+of the scientists and researchers that use Legion.
+

@@ -1,0 +1,711 @@
+
+\chapter{Related Work}
+\label{chapter:related}
+
+The history of programming supercomputers 
+is extensive. In this chapter we attempt
+to cover the most recent work that is closely
+related to Legion. Many of the systems covered
+here are primarily academic systems and not
+in wide use in the larger scientific community.
+For a more comprehensive overview of the way
+that most computational scientists program
+supercomputers we refer readers to 
+Section~\ref{sec:programming}.
+
+\section{Array-Decomposition Languages}
+\label{sec:decomplang}
+
+One of the more recent trends in academic
+research on supercomputing has been the focus
+on array decomposition languages. These programming
+systems have an understanding of the structure of
+program data through the use of arrays. Using 
+their knowledge of arrays, these systems can
+aid programmers by providing easy ways of
+partitioning data and performing optimizations
+to hide communication latencies. We now
+look in detail at several of these array
+decomposition languages.
+
+% Sequoia \cite{Sequoia06}
+One of the most closely related systems to Legion in
+the academic literature is its spiritual 
+ancestor Sequoia\cite{Sequoia06}. Sequoia
+is an array decomposition language targeted
+at programming hierarchical memory. Sequoia
+couples tasks with arrays to be accessed
+and provided mechanisms for launching sub-tasks
+that operated on distinct subsets of the
+arrays that the parent task was given (similar
+in several ways to Legion's privilege system). By 
+recursively decomposing tasks into sub-tasks
+and arrays into sub-arrays, applications could
+be generated that would target deep memory
+hierarchies. While there are many similarities between Legion
+and Sequoia, there are two primary
+differences. First, Sequoia is a static language
+that required all decisions about how to 
+partition arrays and map computations onto
+the target architecture to be known at compile-time whereas
+Legion is a totally dynamic system. Second, Sequoia
+couples the decomposition of tasks with the decomposition
+of data, ultimately constraining both to be 
+decomposed isomorphically to the target memory 
+hierarchy. In Legion, the decomposition of tasks
+and regions are decoupled which makes application
+development more flexible. We will return to 
+Sequoia's mapping interface shortly in 
+Section~\ref{sec:maprelate}.
+
+% Chapel \cite{Chapel07}
+Another array decomposition language related to
+Legion is Chapel\cite{Chapel07}. Chapel provides
+{\em domains} as the fundamental abstract data 
+type for describing collections of data. Using
+domains, applications can create arbitrary 
+collections of data in a way that is machine
+independent. To map data onto a specific machine, Chapel 
+uses {\em locales}, which are abstract locations
+in the machine that are ultimately mapped onto
+specific machine locations. Using {\em domain
+maps} programmers can specify how different domains
+are mapped onto different locales. This gives
+Chapel more flexibility to dynamically decide
+how program data is mapped to the target hardware.
+However, domain maps only support a single decomposition
+of data onto the target architecture that is then
+fixed for the remainder of application's execution.
+Using logical regions, Legion allows applications to 
+describe many different views onto the same data which
+cannot be accomplished with domains. Furthermore, 
+Legion allows different logical regions to be
+mapped into different memories throughout an 
+application's lifetime yielding considerably 
+more flexibility to the programmer than Chapel.
+
+% Co-Array Fortran \cite{CoArray98}
+Like MPI, Co-Array Fortran\cite{CoArray98} is another
+instance of an SPMD programming model. However, unlike
+MPI, Co-Array Fortran provides explicit support for
+describing arrays that are distributed across all
+of the processes in a Co-Array Fortran program. 
+In order to help with the distribution of data, 
+Co-Array Fortran supports many different distribution
+schemas, allowing for applications to tailor these
+distributions based on which data is going to be
+accessed by different nodes. However, similar to
+Chapel, once these distributions are set, the arrays
+are fixed and the distribution cannot be modified.
+This is sufficient for applications that only
+have a single communication pattern, but for more
+complex applications with multiple phases and
+different communication patterns it can often lead
+to poor performance.
+
+% UPC \cite{UPC99,UPCSTANDARD}
+Unified Parallel C (UPC)\cite{UPC99,UPCSTANDARD} is
+another SPMD programming model that instead presents
+a partitioned global address space (PGAS) abstraction
+to programmers. In this model, there is a single address
+space that is designed to make it easier for programmers
+to develop applications.  However, it is implicit that
+each piece of data in the PGAS address space is associated
+with a single node. Reading or writing data is then either
+fast or slow depending on whether the data is local to a
+node or resides on a remote node. While PGAS abstractions
+regularly make it easier to achieve functional programs,
+they are often difficult to tune for performance as 
+decisions about how data is mapped onto different nodes
+is either implicit or baked into application code.
+
+% Titanium \cite{Titanium98}
+While determining whether data is local or remote is
+usually difficult in UPC, Titanium\cite{Titanium98} is 
+another array decomposition language that attempts to 
+make this information explicit through its type system.
+Titanium is an extension to the Java programming model
+that also supports distributed program execution with
+a PGAS model.  Unlike UPC, Titanium's type system encodes
+whether data is local or remote, forcing programmers
+to understand the performance consequences of their
+programs. Furthermore, Titanium also supports different
+array decomposition patterns for distributed data between
+different nodes. By leveraging its static knowledge of
+the type system and array decompositions, the Titanium
+compiler is capable of performing many interesting
+optimizations such as aggregation of communication
+and overlapping computation with communication which
+is difficult to perform in the more general UPC model.
+However, these benefits come at a cost.  Needing to 
+reason about local and remote types can often lead to
+an overly conservative analysis that lowers performance
+when data is actually local. Furthermore, the need to
+statically decide the partitioning of data limits the
+distribution patterns that can be expressed. Finally,
+much like Chapel, only supporting a single view onto
+an array of data is limiting for applications with
+multiple phases and different communication patterns.
+
+\section{Region Systems}
+\label{sec:regionsys}
+
+The term {\em region} has many connotations in the 
+systems literature of which Legion is just
+one example. In this section we will cover 
+region systems that in some ways are related to Legion.
+
+% DPJ \cite{DPJ09,DPJ11}
+Deterministic Parallel Java (DPJ) \cite{DPJ09,DPJ11}
+is the closest region system related to Legion. Regions in 
+DPJ are used to statically describe the sets of 
+data being operated on by different tasks. By
+leveraging this information, the DPJ compiler is
+able to infer where there is interference between
+different tasks as well as where parallelism
+exists. Thus DPJ can extract very low overhead
+parallelism from applications that appear to be
+sequential, which provides a simpler programming
+model for programmers to use when writing
+applications. This approach to automatically
+extracting parallelism based on region usage
+is very similar to Legion's approach. However,
+DPJ requires that tasks statically partition
+data into regions and statically name the regions
+to be accessed by tasks. This limits the kinds
+of computations that can be expressed and restricts
+data to being partitioned in a single way that 
+is often limiting to applications with different
+phases. One benefit of this static approach is that
+the low overhead enables DPJ to reason about 
+considerably smaller regions and to exploit very
+fine-grained parallelism that is difficult for
+Legion to achieve at runtime. The last difference
+between DPJ and Legion is that DPJ still relies
+upon the Java virtual machine, which limits 
+applications to shared memory architectures, while
+Legion is capable of running on distributed machines.
+
+% Cyclone \cite{Cyclone02}
+Cyclone\cite{Cyclone02} is another region system 
+designed for providing high performance and type
+safety for the C language. Cyclone introduces
+lexically scoped regions as a mechanism for 
+allocating and storing data. By applying region annotations
+to functions applications can designate different
+access to regions similar to how Legion tasks
+declare privileges on logical regions. In addition,
+the regions in Cyclone provide a level of indirection
+for decoupling the specification of data from how
+it is laid out in memory. Logical regions in Legion
+provide a similar flexibility, but with a greater
+range of potential layouts.
+
+% RC \cite{RC01}
+One of our early inspirations for using logical
+regions to describe sets of data was RC\cite{RC01}.
+The RC language uses dynamically allocated regions
+for handling memory management and garbage
+collection in C. The dynamic hierarchy of regions
+in RC in some ways is related to the hierarchy
+of logical regions represented by region trees.
+Garbage collection of regions in RC is done using
+a reference counting scheme that bears some
+resemblance to the hierarchical reference counting
+scheme that Legion's garbage collector uses for
+collecting physical instances, with the caveat that
+RC operates in a shared memory address space while
+Legion works in a distributed environment.
+
+\section{Task-Based Systems}
+\label{sec:tasksys}
+
+While most of the previous work that we have
+addressed has centered around abstractions for
+decomposing data, there are also many systems
+that are oriented around tasks. In this
+section we detail related work that is primarily
+based on extracting parallelism through 
+descriptions of parallel tasks.
+
+% SSMP \cite{SSMP10}
+SSMP\cite{SSMP10} is a task based system that
+in some ways is similar to Legion. SSMP allows
+for the creation of tasks that describe data
+access patterns to shared memory data structures.
+Using these access patterns, SSMP discerns which
+tasks have data dependences and which can be
+run in parallel. This is similar to how Legion
+extracts parallelism based on the logical region
+usage of different tasks. In some ways SSMP
+can be easier to use than Legion because describing
+access patterns can be easier than
+allocating data in logical regions. However,
+this is only possible because SSMP operates
+within shared memory architectures. Logical regions
+enable Legion to understand the structure of
+program data and not just the set of data 
+accessed by different tasks, which is a necessary
+prerequisite for operating in a distributed
+memory environment. Another difference is that
+all SSMP tasks are checked for non-interference.
+This is only scalable on a shared memory system
+whereas Legion relies on its independence principle
+to perform scalable non-interference tests in
+a distributed environment. This approach also
+allows Legion to extract nested parallelism while
+SSMP is unable to take advantage of any 
+hierarchy of its tasks.
+
+% Jade
+Perhaps the closest related work to Legion 
+was the design and implementation of the
+Jade language\cite{Jade98}. Jade is a task based
+language where tasks are issued in sequential
+program order. Tasks dynamically declare the
+accesses that they are to perform to various
+shared objects. The Jade runtime then dynamically
+determines data dependences based on the
+data accesses performed to the shared objects.
+This implicit extraction of parallelism from
+dynamic information is very similar to Legion.
+Furthermore, unlike SSMP, Jade is capable of
+performing this analysis in a distributed 
+system at the very fine granularity of individual
+objects. It is important to note that this is
+possible because Jade was developed at a time
+when communication was significantly faster than
+processor speeds, which made complex distributed
+algorithms requiring much more communication
+tractable. Jade tracks versions of shared objects
+in a way that is similar to how Legion tracks
+versions of logical regions. Legion uses logical
+regions as coarser objects over which to perform
+analysis to amortize the cost of dependence analysis.
+Legion also relies on its containment principle
+in order to make analysis hierarchical, which reduces
+the communication that needs to be performed by
+the runtime. Jade has no such restriction as
+runtime communication was not a performance 
+bottleneck on the the class of machines it was 
+targeting.
+
+% Cilk \cite{Cilk98}
+Another task based system based on an initial
+sequential programming model is the Cilk
+language\cite{Cilk98}. Cilk is an extension of
+the C language that allows function calls to
+be spawned off as independent tasks. Using 
+{\em sync} statements, programmers can then
+specify when parallel work must be completed.
+One of the benefits of Cilk is that the elision
+of all the Cilk extensions to a program results
+in a valid C program, which makes it easy to
+extend existing code. One downside to the Cilk
+programming model is that unlike Legion, Jade,
+and SSMP, Cilk programmers are directly responsible
+for specifying where parallelism and synchronization
+need to happen. This makes it easy to introduce
+race conditions and bugs both when writing and
+maintaining code. The primary reason for this
+is that the Cilk runtime has no knowledge about
+the structure of program data and therefore
+must trust the programmer to correctly specify
+parallelism and synchronization. Another consequence
+of this is that Cilk can only operate in a
+shared memory environment as it has no knowledge
+of how to move program data necessary.
+
+% Galois \cite{Galois11}
+A more recent task-based system is the Galois
+programming system\cite{Galois11}. The Galois 
+programming model and runtime is designed for 
+extracting task based parallelism from irregular 
+computations that are difficult to parallelize 
+and load balance. To handle this class of
+applications, Galois provides several special
+kinds of data structures such as ordered
+queues and un-ordered queues. By combining
+efficient implementations of these data structures
+with small tasks operating on data structures
+(generalized as {\em morph} operators), Galois
+can extract fine-grained task parallelism
+from applications with irregular data structures.
+In Legion, equivalent behavior is obtained through
+the use of relaxed coherence modes such as
+atomic and simultaneous. However, because
+Galois operates only within a node and requires
+no knowledge of the underlying data structures
+it can handle much finer-grained tasks than
+Legion.
+
+\section{Place-Based Programming Models}
+\label{sec:places}
+
+While most systems for distributed machines
+use SPMD programming models, some encourage
+a more asynchronous approach based on the
+abstraction of {\em places}. Places are
+either abstract or concrete machine locations 
+that enable application developers to name 
+where either computation or data is to be
+assigned. Instead of having computations
+implicitly start running across all the nodes
+within a machine, an application must specify
+where different computations as well as the
+data that they require are assigned. We cover
+several the several systems that illustrate
+the evolution of the place-based programming
+model here.
+
+% X10 \cite{X1005}
+The origin of place-based programming models
+is the X10 programming language\cite{X1005}.
+X10 is an extension of the Java language
+that creates abstract places for naming where
+computations and data can be placed. A later
+deployment step maps abstract places onto
+concrete locations in the machine. The X10
+programming model is mostly asynchronous
+and encourages the creation of many independent
+asynchronous operations. This approach aids
+in extracting significant parallelism from X10
+programs, but it suffers from two fundamental
+problems. First, there is no way in X10 for
+programmers to compose operations (e.g. issue
+a asynchronous task launch dependent on an
+asynchronous copy completion).  As a result
+programmers must explicitly manage synchronization,
+which yields code that suffers from the
+same modularity problems as MPI codes. Second,
+programmers have to explicitly determine the
+mapping of applications onto places as part
+of their code. This hard-codes the effective
+mapping decisions into the code, making it
+very difficult to try new mapping decisions
+later without significant refactoring, which
+can potentially introduce correctness bugs.
+
+% Hierarchical Place Trees \cite{HPT09}
+One of the shortcomings of X10 places is 
+that the abstract places were organized
+as a flat graph with little structure to
+provide programmers with any meaningful
+information about the underlying hardware.
+To rectify this problem, Hierarchical
+Place Trees\cite{HPT09} were introduced.
+The Hierarchical Place Trees model differs from X10
+by organizing places into a tree. Places
+higher in the tree and closer to the root
+correspond to slower memories with less
+processing power, while places lower in the 
+tree and closer to the leaves correspond to 
+smaller faster memories with more processing
+power (and more processors because of the
+larger number of nodes). While hierarchical
+place trees make it possible to write X10 
+programs that express abstract locality and better
+describe data movement through the memory
+hierarchy, they still suffer from the
+same fundamental problems regarding hard-coded
+mappings as X10 programs using flat places.
+
+% Habanero \cite{Habanero11}
+Most recently, work on X10 and hierarchical
+place trees has been extended to create
+Habanero Java\cite{Habanero11}. Habanero
+Java presents a more structured approach to
+programming with places. A richer set of
+primitives for launching asynchronous tasks
+and performing synchronization makes it possible
+for the language to make provable guarantees
+regarding deadlock and determinism. Specifically
+the {\em phaser} construct in Habanero Java
+resembles in some ways the phase barrier 
+synchronization primitive used with relaxed
+coherence modes in Legion. Despite the 
+additional programming features and new guarantees
+made by Habanero Java, it too directly encodes
+the mapping of an application to places in a
+way that is difficult to tune and modify for
+new architectures.
+
+\section{Actor Models}
+\label{sec:actors}
+
+Another common approach to programming machines
+with distributed memory systems is to use an
+actor model.  In an actor model each object
+operates as a separate entity that both handles
+incoming messages and can send out its own
+messages to other actors in the system. We highlight
+two actor models for scientific programming here.
+
+% Charm \cite{Charm93} 
+The canonical instance of an actor model being
+used in a supercomputing context is the Charm++
+language\cite{Charm93}. Charm++ is an object-oriented
+programming model for distributed memory machines.
+In Charm++ any object can invoke a method on any
+other object.  If both objects reside on the same
+node, then the method invocation occurs as it
+would in a shared memory machine.  However, if the
+objects reside on different nodes, then the method
+invocation is automatically converted into a message
+that is sent to the node where the target object
+is stored. Charm++ programs rely on this feature
+to perform all communication between nodes. In order
+to reduce communication costs, the Charm++ runtime
+attempts to discover the underlying communication
+pattern and re-arrange object placement to minimize
+communication.  Despite this approach to minimizing
+communication, Charm++ still suffers from the
+fundamental problem that communication patterns 
+consist of sending many very small messages between
+nodes. This was acceptable in the decade when Charm++
+was designed because communication networks were
+significantly faster than processors.  However,
+in the two decades that have elapsed since, processors
+have become significantly faster than the communication
+networks. Ultimately, Charm++ programs suffer from
+low utilization of the network due to many small
+messages and an inability to scale their runtime
+algorithms for re-arranging objects to today's
+large machines.
+
+% Tarragon \cite{Tarragon06}
+Another example of an actor model is the Tarragon
+programming model\cite{Tarragon06}. While not a pure 
+actor model, Tarragon combines elements of static 
+dataflow with actor-like operations. Tarragon allows 
+programmers to construct static graphs of tasks. Edges 
+between tasks specify where communication between tasks is 
+allowed to occur.  At runtime tasks can then send
+arbitrary messages to other tasks with which they
+share an edge. In this way Tarragon can know the
+communication pattern of an application statically,
+while still permitting the application to engage
+in a dynamic actor-like communication framework.
+By leveraging the static knowledge of the communication 
+graph, the Tarragon compiler can optimize many of the
+communication paths at compile-time.
+
+\section{Dataflow Models}
+\label{sec:dataflow}
+
+One of the closer sets of related work to Legion
+involves dataflow programming models.  In dataflow
+models, programmers explicitly specify the data
+that must be passed from one operation to the next.
+In some ways these systems are related to Legion
+as the resulting dependence graphs constructed
+by Legion are similar to the dataflow graphs
+constructed by these systems.
+
+% Id \cite{Id90}
+In their infancy, dataflow languages were initially
+designed for expressing very fine-grained operations
+that could be easily mapped onto the hardware. 
+One example of these kinds of dataflow languages
+is the Id programming language\cite{Id90}. Id 
+allowed developers to write programs consisting of
+fine-grained functions with explicit data dependences
+between functions. The Id compiler then mapped 
+the dataflow program down onto a specialized dataflow
+processor. In many ways Id was a successful demonstration
+of how dataflow could be leveraged to extract
+significant fine-grained parallelism from applications.
+However, as the disparity between processor speeds
+and the available memory bandwidth grew, dataflow
+architectures could no longer support the large
+bandwidths required of fine-grained dataflow
+programs making it much harder to maintain
+performance improvements with each successive
+processor generation.
+
+% Lucid \cite{Lucid95}
+To handle the complications encountered by Id,
+many dataflow languages moved to a coarser
+granularity of operations. One particular example
+of this transition is the Lucid dataflow
+system\cite{Lucid95}. Lucid introduced coarse-grained 
+operations that explicitly specified
+data usage, and then allowed the system to 
+implicitly extract the dataflow inherent between
+different operations.  In many ways this is
+similar to how Legion extracts data dependences
+between tasks based on region usage.  The primary
+different is that Legion's logical regions are
+routinely much larger than the dataflow edges
+described in Lucid programs. 
+
+% GCD \cite{CGD09}
+More recently, dataflow systems have been undergoing
+a renaissance as a way to deal with modern heterogeneous
+architectures. For example, CGD is an example of
+dataflow system designed for converting SPMD programs
+into dataflow applications\cite{CGD09}. By leveraging
+its understanding of data layouts in distributed systems
+CGD automatically computes dataflow edges between
+different tasks and then attempts to hide communication
+latency through its knowledge of which tasks are safe to
+run in parallel. Legion performs many of the same
+optimizations as CGD, but does so based on its understanding
+of logical regions.  Since Legion is not a pure
+dataflow system like CGD it is more expressive, but
+the underlying representation of tasks and their
+data dependences are similar in many ways to dataflow
+systems.
+
+\section{Low-Level Runtimes}
+\label{sec:lowrts}
+
+The Legion runtime system is primarily a higher-level
+programming system because it provides higher-level
+abstractions such as logical regions that aid in the 
+development of Legion applications. However, there
+are also runtime systems that are more accurately
+categorized as low-level programming systems that 
+provide the minimal number of intrinsics for 
+executing parallel applications. Low-level runtime
+systems are more closely related to Legion's
+low-level runtime system Realm\cite{Realm14}, but
+we cover them here for completeness.
+
+% StarPU \cite{StarPu11}
+StarPU is a low-level runtime system that allows
+application developers to dynamically construct
+a task graph with dependences\cite{StarPu11}. The 
+StarPU runtime is then free to optimize the 
+execution of this graph in any way that is 
+consistent with the specified dependences. In many
+ways this is similar to the semantics of the 
+Realm runtime.  There are two primary differences.
+First, Realm provides generational events that 
+alleviate the need for the Legion runtime to garbage
+collect event objects, which is part of the StarPU
+interface. This significantly simplifies the 
+implementation of the Legion runtime.  Second,
+StarPU does not support the reservation and
+phase barrier intrinsics supplied by Realm, which
+are crucial for implementing relaxed coherence
+modes.
+
+% TAM \cite{TAM91}
+Another related low-level runtime system to Realm is
+the Threaded Abstract Machine (TAM)\cite{TAM91}.
+Unlike Realm and StarPU, TAM is a hybrid static/dynamic
+system. At very fine granularities, TAM requires
+static dependences to be specified between tasks
+in order to allow for the TAM compiler to schedule 
+the resulting tasks at compile-time.  This 
+approach is necessary to deal with fine-grained
+parallelism. At coarser granularities, TAM is
+dynamic, with the graph of dependences between
+{\em frames} evolving at runtime. TAM was designed
+in an era of much smaller machines than modern
+heterogeneous supercomputers and therefore leaves
+much of the execution of the dynamic dependence
+graph to the client. TAM also has limited support
+for synchronization primitives analogous to
+reservations and phase barriers.
+
+% GASNet \cite{GASNet02}
+An even lower-level runtime system is GASNet\cite{GASNet02}.
+GASNet provides the basis for the Realm runtime
+system and aids in portability by providing different
+conduits for various interconnect architectures
+such Infiniband, Cray Gemini and Aires, and Blue
+Gene L/P/Q. GASNet provides primitives for supporting
+communication using one-sided RDMA puts and gets
+as well as an active message interface. Most inter-node
+communication done in Legion is performed using
+GASNet active messages while bulk data transfer
+is handled using the one-sided RDMA puts. While
+GASNet provides many additional operations with
+its extended API, but Legion does not use them. 
+This suggests that the GASNet interface could 
+potentially be simplified and further optimized.
+
+% X-Stack Projects
+
+\section{Mapping Interfaces}
+\label{sec:maprelate}
+
+One of the more novel aspects of Legion is its
+dynamic mapping interface which provides a way
+of decoupling the specification of how an application
+is mapped from the algorithm. While the Legion
+design is unique, there are several other systems
+that use related ideas for decoupling algorithms
+from how they are mapped.
+
+% Sequoia \cite{Sequoia06}
+To the best of our knowledge the first programming
+system with an explicit mapping interface was
+the previously mentioned Sequoia language\cite{Sequoia06}.
+In addition to taking source files, the Sequoia
+compiler also required applications to provide
+mapping and machine files.  A machine file gave
+a description of the target architecture and the
+mapping file directed the Sequoia compiler how to
+map the machine-independent source code onto the
+target machine. This approach made Sequoia code
+very portable. The only downside to this approach
+was that all mapping decisions had to be made
+statically in keeping with Sequoia's static
+language semantics. While static mapping enabled
+many of the Sequoia compiler's global optimizations, 
+it does not permit applications to dynamically react
+to the dynamic nature of either an application
+or the underlying hardware.
+
+% Halide \cite{Halide13}
+Another programming system that makes use of an
+explicit mapping interface is the Halide language
+and compiler\cite{Halide13}. Halide is a language
+and compiler for describing and optimizing image
+processing pipelines. Halide programs describe
+operations that are performed on two dimensional
+images and the Halide compiler optimizes the
+implementation of these pipelines for different
+architectures.  To perform these optimizations,
+the Halide compiler attempts to find high-performance
+{\em schedules} for a given pipeline. A schedule
+is analogous to a mapping in Legion or Sequoia as
+it specifies which computations are executed on
+different processors as well as how data movement
+is performed. Much like Sequoia, schedules in Halide 
+are static and can either be specified or searched 
+for using an auto-tuner. The fine-grained nature
+of Halide image pipelines necessitates that these
+schedules be determined statically.
+
+% Terra \cite{Terra13}
+While Legion has an explicit mapping interface
+for mapping applications onto target hardware,
+another approach to performing dynamic mappings
+is to leverage meta-programming to just-in-time
+(JIT) compile code that is specific to the target
+architecture at runtime. One of the more recent
+ways to accomplish this is with two-stage
+programming in Lua-Terra\cite{Terra13}. Lua is
+a dynamically typed scripting language designed
+for productivity while Terra is a C-like statically
+typed performance language. The Terra compiler 
+allows for meta-programming to be done in Lua
+so that Lua can construct Terra functions at
+runtime and JIT them either to specialize for
+the dynamic behavior of an application or to
+target specific hardware. Using meta-programming
+Lua-Terra programs can dynamically specialize
+and map a function for a target architecture. This
+feature ultimately convinced us that using
+meta-programming in Lua-Terra to create generator
+functions was the right approach to specializing
+Legion tasks for specific architectures and 
+region instance layouts. Using Lua-Terra generator
+tasks, Legion applications can be dynamically
+specialized for any potential target architecture
+and mapping decision.
+

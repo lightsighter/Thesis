@@ -1,0 +1,62 @@
+
+\beforepreface
+\prefacesection{Abstract}
+\label{sec:abstract}
+
+This thesis covers the design and implementation of Legion,
+a new programming model and runtime system for targeting
+distributed heterogeneous machine architectures. Legion
+introduces {\em logical regions} as a new abstraction for 
+describing the structure and
+usage of program data. We describe how logical regions 
+provide a mechanism for applications to express important 
+properties of program data, such as locality and independence, 
+that are often ignored by current programming systems. We also
+show how logical regions allow programmers to scope the usage of 
+program data by different computations. The explicit nature of 
+logical regions makes these properties of programs manifest, 
+allowing many of the challenging burdens of parallel programming,
+including dependence analysis and data movement, to be off-loaded 
+from the programmer to the programming system.
+
+Logical regions also improve the programmability and portability 
+of applications by decoupling the specification of a program 
+from how it is mapped onto a target architecture. Logical
+regions abstractly describe sets of program data without
+requiring any specification regarding the placement or layout of data.
+To control decisions about the placement of computations
+and data, we introduce a novel {\em mapping interface}
+that gives an application programmatic control over mapping 
+decisions at runtime. Different implementations
+of the mapper interface can be used to port applications
+to new architectures and to explore alternative mapping
+choices. Legion guarantees that the decisions made through 
+the mapping interface are independent of the correctness 
+of the program, thus facilitating easy porting and tuning 
+of applications to new architectures with different performance
+characteristics.
+
+Using the information provided by logical regions,
+an implementation of Legion can automatically
+extract parallelism, manage data movement, and infer
+synchronization. We describe the algorithms and data
+structures necessary for efficiently performing these
+operations. We further show how the Legion runtime can 
+be generalized to operate as a distributed system, making 
+it possible for Legion applications to scale well.
+As both applications and machines continue to become more 
+complex, the ability of Legion to relieve application 
+developers of many of the tedious responsibilities
+they currently face will become increasingly important. 
+
+To demonstrate the performance of Legion, we port a
+production combustion simulation, called S3D, to Legion. 
+We describe how S3D is implemented within the Legion
+programming model as well as the different mapping
+strategies that are employed to tune S3D for runs
+on different architectures. Our performance results
+show that a version of S3D running on Legion is 
+nearly three times as fast as comparable state-of-the-art
+versions of S3D when run at 8192 nodes on the number
+two supercomputer in the world.
+

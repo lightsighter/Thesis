@@ -1,0 +1,726 @@
+
+% Due Date: 7/31/14
+
+\chapter{Speculation and Resilience}
+\label{chapter:resilience}
+In modern hardware out-of-order processors, branches
+can have a significant impact on performance. Waiting
+until the branch condition evaluates can stall 
+execution and result in significant bubbles in
+the instruction pipeline. To
+avoid the performance degradation associated with 
+branches, out-of-order processors rely on branch
+predictors and speculation to continue executing
+beyond a branch even before it has been evaluated.
+If a branch is mis-predicted, then the speculatively
+executed instructions are flushed, and execution
+restarts at the mis-predicted branch. With accurate
+branch predictors, speculative execution results
+in considerable performance gains.
+
+The Legion programming model has an analogous problem
+to dynamic branching. In many applications, as a 
+parent task is launching sub-tasks, determination
+of which sub-tasks to launch can be dependent on dynamic
+values computed by earlier sub-tasks. For example, an 
+iterative numerical solver needs to continue executing
+sub-tasks until it converges. The test for convergence
+often is dependent upon earlier sub-tasks, and the
+decision about whether to continue execution (e.g. the
+{\tt if} or {\tt while} statement) must be evaluated
+before execution can continue. Usually this involves
+waiting on a future that blocks execution, causing
+the Legion pipeline to drain.
+
+To avoid blocking on futures for evaluating these
+dynamic branches, the Legion programming model enables
+task execution to be predicated. In many cases this
+allows applications to execute past branches, and
+discover additional parallelism. We discuss predication
+in more detail in Section~\ref{sec:predication}.
+To further increase performance, Legion also permits
+mapper-directed speculation of predicated execution.
+By allowing tasks to execute speculatively, further
+work can be uncovered and performed. We discuss
+speculative execution in Section~\ref{sec:speculation}.
+
+An important added benefit of supporting speculation
+is that the same machinery used for recovering from
+mis-speculation can be re-purposed to handle recovery
+from faults. The dynamic dependence graph computed as
+part of dependence analysis 
+(see Chapter~\ref{chapter:logical}) permits the Legion
+runtime to precisely scope the effects of both faults
+and mis-speculation. We discuss how this symmetry along
+with an additional task pipeline stage can be used
+to seamlessly provide resilience support for Legion
+in Section~\ref{sec:resilience}.
+
+\section{Predication}
+\label{sec:predication}
+To avoid waiting on future values to evaluate
+branches, the Legion programming model allows applications
+to launch predicated sub-tasks. Predicates can either
+be assigned based on a computed boolean value, or 
+created directly from a boolean future. Predicates can
+also be composed to create additional predicates using
+standard boolean operators (e.g. {\tt and}, {\tt or},
+and {\tt not}). By default all tasks in Legion are
+launched with the constant predicate representing 
+{\tt true}. Applications are free to change the predicate
+to any arbitrary predicate.
+
+When a predicated task is launched, it goes into the
+standard dependence queue along with all other tasks
+launched within the same context. Dependence analysis
+is performed in sequential program order as described
+in Chapter~\ref{chapter:logical}. Predicated tasks
+register dependences on other operations, just like
+non-predicated tasks. Similarly, other operations can
+record dependences on predicated tasks. The difference
+for predicated operations occurs once all of its mapping 
+dependences have been satisfied. A predicated task is
+not immediately placed into the ready queue for a 
+mapper until its predicate value has been resolved
+(unless the mapper decides to speculate on the predicate
+which we discuss in Section~\ref{sec:speculation}).
+Once the predicate value is resolved, the execution
+of the task can continue. In the case that the predicate
+is evaluated to true, the task is placed in the ready
+queue for its target mapper and proceeds like a normal 
+task. In the case when the predicate evaluates to false, 
+the task immediately progresses through the rest of the 
+task stages to the complete stage without executing (in 
+the process of completing the mapping stage it also 
+triggers all its mapping dependences). While predicated 
+execution may be slightly limited in allowing predicated 
+tasks to execute before the predicate resolves, the ability
+to use predicates to evaluate past dynamic branches
+dependent on future values allows the Legion runtime
+to continue discovering additional parallelism, 
+thus resulting in higher performance.
+
+The Legion programming model currently only allows
+some operations to be predicated. Specifically, only
+sub-tasks, explicit copies, acquire, and release
+operations are permitted to be predicated. For 
+operations such as inline mappings predication
+does not make sense because the launching task will
+need to wait for the physical region to be ready
+anyway, so waiting on the future predicate introduces
+no additional latency beyond what would be observed
+anyway. For operations that are permitted to be 
+predicated and that return future values, the 
+runtime requires that applications provide default
+values for futures in case the operation is predicated
+false. Without a default future value, futures could
+be mistakenly used when they would never be completed.
+This would be especially bad in cases where an empty
+future was used to create a predicate. To provide a
+default future value, applications can either give
+a concrete value, or another future of the same
+type. By providing a default value for futures in 
+the case of false predication, the programming model
+maintains the invariant that all futures will eventually
+be completed with a specific value.
+
+\section{Speculation}
+\label{sec:speculation}
+While predication allows Legion to discover additional
+independent non-predicated tasks to execute while waiting
+for predicates to resolve, it does not allow Legion to
+execute predicated tasks until their predicates have
+resolved. For truly high performance, speculative execution
+is necessary to begin executing tasks before their 
+predicates resolve. This is especially important for
+applications such as iterative solvers in which nearly
+all tasks are predicated on the previous loop iteration
+having not converged, resulting in large chains of 
+dependently predicated tasks. Especially in this scenario,
+predicting the value of predicates is straightforward:
+the solver never converges until the last iteration
+so always predict non-converged. By speculating on 
+predicate values, Legion can begin mapping and executing
+tasks and other operations before predicates resolve.
+
+In this section we cover the machinery necessary for 
+handling both speculation as well as mis-speculation. 
+Section~\ref{subsec:specexec} covers how mappers can
+decide to speculate on a predicate and how the runtime
+can detect mis-speculation. In order to recover from 
+mis-speculation, the runtime maintains a scheme for 
+versioning logical regions that we cover in
+Section~\ref{subsec:versioning}. In 
+Section~\ref{subsec:recovery}, we detail how the Legion
+runtime recovers from mis-speculation once it has been
+detected.
+
+\subsection{Speculative Execution}
+\label{subsec:specexec}
+% Mapper directed speculation
+The decision about whether to speculatively execute a 
+task is purely a performance decision and has no impact
+on application correctness. Therefore all decisions about
+when and how to speculate are resolved by the mapper
+object specified for an operation. For each predicated
+operation, if its predicate has yet to be resolved
+when all its mapping dependences are satisfied, the
+runtime queries the mapper to determine if it would
+like to speculatively execute the task. There are three
+valid responses: the mapper can choose not to speculate,
+it can speculate {\tt true}, or it can speculate 
+{\tt false}. In the case where speculation is not 
+requested, then the operation executes like a standard
+predicated operation as described in 
+Section~\ref{sec:predication}. If the mapper predicates
+true, the task is placed onto the ready queue and 
+proceeds to execute as if the predicate had resolved 
+to true. If the mapper elects to speculate false, then
+the default false value for the future is set and the
+task does not execute. If the speculative value chosen
+by the mapper proves to be prescient, then tasks will
+proceed through to the completion stage as though they
+were not even predicated. We discuss how the runtime
+recovers from mis-speculated predicate values in 
+Section~\ref{subsec:recovery}.
+
+One of the important invariants maintained by the runtime
+is that no operation is allowed to proceed to the 
+completion stage in the pipeline until all possible
+speculative inputs have been resolved. It is important
+to note that this applies even to tasks and other operations
+that are not speculative. For example, if a task $B$ has
+a data dependence on a logical region that is produced
+by a task $A$, then if $A$ is speculatively executed $B$
+cannot be considered to be non-speculative until $A$
+resolves its speculation. To track this invariant we add
+an additional kind of dependence between operations in 
+the dynamic dependence graph for tracking {\em speculative
+dependences} and incorporate a {\em resolve speculation}
+stage into the operation pipeline before the 
+completion stage.
+
+Speculative dependences are registered as part of the 
+logical dependence analysis described in 
+Chapter~\ref{chapter:logical}. For every mapping dependence
+registered on an operation that has not resolved its
+speculative state, an additional speculative dependence
+is registered between the operations. Speculative operations
+can also be registered another way. If a task is 
+predicated, then a task cannot resolve its speculative state
+until all the future values used to compute the predicate
+are also non-speculative, thereby entailing that the operations
+that compute those futures are also non-speculative. It
+is important to note that this definition of non-speculative
+is inductive allowing Legion to automatically handle cases
+of nested speculative execution (similar to modern hardware
+out-of-order processors). An operation is considered no
+longer speculative once all of its incoming speculative
+dependences are resolved and it has resolved any speculation
+that it performed. Having resolved its speculative state
+the operation can then notify all its outgoing speculative
+dependences and progress to the completion stage of the
+operation pipeline.
+
+An important detail regarding the resolve speculation stage
+is that it permits future values to be propagated for 
+computing predicates, but it does not permit futures to 
+actually be completed and made visible to the enclosing
+parent task. There is an important reason for this. First,
+we want speculative execution to enable additional speculative
+execution. For this reason we allow 
+future values to propagate through a predicate chain to aid
+in this process. While this may lead to additional speculative
+execution, it is the kind that Legion is capable of recovering
+from internally without requiring a restart of the enclosing
+parent task (see Section~\ref{subsec:recovery} for more
+details). We do not permit speculative future values to be
+completed and made visible to the enclosing parent task. If
+we did, then these speculative values escape the ability of
+the runtime to recover from mis-speculation as the future
+value may be used for performing arbitrary computation
+in the enclosing parent task. Any mis-speculation could then
+ultimately lead to re-execution of the parent task, which
+is a poor recovery model from a performance standpoint. Therefore
+we allow futures from tasks still in the resolve speculation
+stage to propagate internally, but not to be visible to
+the enclosing parent task until speculation is resolved.
+
+\subsection{Data Versioning}
+\label{subsec:versioning}
+As part of speculative execution, the Legion runtime needs
+a versioning mechanism for tracking logical region data
+in order to be able to recover from mis-speculation. 
+There are two different kinds of versioned data that must
+be tracked. First, versions of physical instances must
+be explicitly tracked from each logical region perspective.
+Second, the runtime must track different versions of the
+physical state meta-data in order to be able to re-map
+mis-speculated executions. We now describe how each of
+these two versioning systems work in detail as well as
+how the tasks record the necessary versioning information
+for when they need to be re-issued 
+(see Section~\ref{subsec:recovery}).
+
+% Versioning of physical instances
+The first kind of versioning done by the runtime is for 
+logical regions and physical instances. Versioning of
+logical regions and physical instances is necessary to 
+know when speculative execution has potentially corrupted
+the data in a physical instance, and therefore it cannot
+be re-used when an operation is re-mapped. To detect this
+case, we maintain a version number with each logical region
+and physical instance. Version numbers are assigned to logical
+regions as part of the logical dependence analysis using
+the following scheme. Every write applied to a logical region
+increments the version number of the region by two. The write
+also updates the version numbers of any ancestor logical regions.
+If an ancestor logical region has an even version number, its
+version number is incremented by one, otherwise no operation
+is taken if the version number is odd.
+Odd numbered versions therefore represent partial writes
+where at least one child logical region has dirty data.
+When a close operation is performed, the target logical 
+region version number is incremented by two if it is even
+and one if it is odd. When a logical region is opened,
+it checks its version number against its parent version
+number, and the larger of the two is taken as the updated
+version number. This scheme is used independently on each
+field to avoid ambiguity.
+
+When tasks perform their dynamic dependence analysis for
+each of their logical regions, they record the version
+numbers for all required fields along the path from where
+their parent task had privileges to the logical region on
+which they are requesting privileges. When performing 
+the traversal of a physical instance to record writers,
+the same versioning scheme is used to track the version
+number for each field in an instance view object. If the
+version number of a logical regions matches the version
+number of a physical instance, then we know the data
+contained in the physical instance is correct. However,
+if an operation is re-issued because of mis-speculation
+and the version number for a field in a physical instance 
+is larger than the version number recorded by the task
+as part of the logical dependence analysis, then the
+physical instance can no longer be considered a valid
+copy of the data for that logical region.
+
+% Versioning of region tree node state
+In addition to versioning logical regions and physical
+instances, the runtime must also version the physical
+states of the logical region tree nodes. As we will
+discuss in Section~\ref{subsec:recovery}, logical
+dependence analysis only needs to be performed once
+regardless of speculation, but physical dependence 
+analysis needs to be performed each time an operation
+is re-issued as part of mis-speculation. To support the
+re-issuing of tasks, we also version the physical state
+associated with logical region for all fields so that
+the physical dependence analysis can be performed.
+We modify the physical state object stored for each
+physical context at every logical region node in region
+tree (and described in Chapter~\ref{chapter:physical}) to 
+store two additional kinds of information. First, in addition
+to storing a list of physical instances with field masks to 
+describe the valid instances, we also keep a list of all 
+previously valid physical instances. Associated with each
+element in this list is a mapping from from version numbers
+to field masks describing which fields where valid for a
+physical instance under which versions. The second 
+additional data structure that we store for versioning is
+a list of open children. For each open child, we maintain
+a map from version numbers to field masks describing 
+which fields were open for each child under each version
+number. Version numbers for physical state objects follow
+the same versioning protocol as for logical regions and
+physical instances. Even though read operations mutate
+physical state objects, they simply create additional 
+valid physical instances and do not fundamentally change
+the nature of the physical state, permitting the same
+versioning scheme to be used. The recorded information 
+regarding the version numbers of logical regions as
+part of the dynamic dependence analysis in conjunction
+with the additional stored information on physical states
+can automatically be used to regenerate the physical
+state for any logical region node when an operation
+is re-issued due to mis-speculation.
+
+\subsection{Mis-speculation Recovery}
+\label{subsec:recovery}
+When mis-speculation is detected, it is the responsibility
+of the Legion runtime to automatically recover from the 
+mis-speculation. There are several parts to recovering from
+mis-speculation and we cover them in detail sequentially.
+First, once a mis-speculated operation has been identified,
+the runtime must compute the set of dependent operations 
+that are impacted by the mis-speculation. Fortunately, based
+on the dynamic dependence graph computed by the logical
+dependence analysis, this process is straight-forward. The
+runtime starts at the node representing the mis-speculated
+operation and walks forward through the graph following all
+the unsatisfied speculation edges, recording all nodes
+encountered along the way. We refer to nodes impacted by
+the mis-speculation as {\em poisoned} nodes. As part of 
+the traversal, the runtime resets all mapping dependence
+edges to poisoned nodes that were impacted by the 
+mis-speculation. 
+
+In the process of traversing the dynamic dependence graph,
+the runtime sorts poisoned nodes into two different classes:
+nodes whose operations have already been triggered to map
+and those that have yet to have all their mapping dependences
+satisfied. Operations that are yet to progress to the
+mapping stage are easy to recover by simply resetting the 
+satisfied mapping dependences to the unsatisfied state. 
+Alternatively, if an 
+operation has begun to map, already mapped, already been 
+issued to the low-level runtime, or potentially already 
+run, then recovery is more challenging. Importantly, we know
+that it is impossible for any of the poisoned operations to
+have progressed past the resolve speculation stage of the
+operation pipeline because of the transitive nature of
+speculation dependences discussed in 
+Section~\ref{subsec:specexec}.
+
+Recovering operations that have progressed beyond mapping
+requires a multi-stage shoot-down process. First, we mark the operation
+as having been poisoned. This prevents it from taking any
+additional steps in the pipeline, allowing us to begin the
+recovery process. Next, we begin recovering the effects of
+each of the stages in the pipeline in reverse order. If an
+operation has already been issued to the low-level runtime
+then we immediately poison its post-condition event. If
+the operation has yet to run, we also poison its precondition
+event. By poisoning these events, the low-level
+runtime receives immediate information that this subset
+of the event graph and all its dependences can be poisoned
+and elided from execution.
+
+Progressing backwards from the mapping execution stage, if
+a task has already been distributed to a remote node, then
+a message is sent to the target node the task was sent to,
+instructing it to initiate the recovery process. It is possible
+that as part of the mapping process that the task was stolen
+or sent to another remote node. The runtime maintains forwarding
+information for all distributed tasks that it has observed until
+it receives notification that the operation has committed, 
+allowing it to continue to forward these messages to the eventual
+destination. When a remote node receives the notification, it
+performs the same recovery process as the origin node of the task.
+
+After the distribution stage has been recovered, the runtime
+proceeds to recover the mapping stage. All valid references
+held by the task operation are removed, permitting the physical
+instances to be potentially collected. Note that we do not need
+to roll back the physical state of the region tree because it
+is captured in the versioned state of the physical instances 
+at each point in time. Poisoned operations do remove any references
+that they hold to different versions of the physical states
+of region tree nodes that they held, potentially allowing these
+states to be recovered since they are no longer valid.
+
+Once all of the poisoned operations have been recovered, it
+is now safe to begin the re-execution of operations. Unfortunately,
+it is not safe to immediately begin re-execution of the task
+that was initially mis-speculated. In the process of 
+speculatively executing tasks, we may have corrupted physical
+instances that contained the data necessary for performing
+the speculation initially. In order to determine if we still
+have access to a valid instance for each logical region 
+of the initial mis-speculated task, the runtime traverses the 
+physical states of the region tree nodes at the versions
+required by the initially mis-speculated task. It then
+checks all the valid instance views to see if any of their
+version numbers have been advanced. If they have, then they
+can no longer be considered valid copies of the data and
+are invalidated. If they still have the same version number
+then they can be re-used. If at least one valid instance
+can be found for each logical region, then we still have
+valid copies of all the data and can begin re-execution.
+
+If a valid physical instance for any logical region 
+required by the mis-speculated task cannot be found, then
+it is the responsibility of the runtime to re-issue the
+previous tasks that generated the valid instance view
+data. The runtime walks backwards through the dynamic
+dependence graph for each region requirement that does
+not have a valid instance. At each node, it performs the
+same test as on the mis-speculated operation to see if 
+valid physical instances exist to re-execute the operation.
+If valid physical instances of the right version exist,
+then the operation is re-issued and the traversal terminates.
+Otherwise, the runtime recursively invokes this process
+to re-issue all necessary operations for re-computing data.
+
+There are two conditions under which the recovery process
+will fail. First, if the recovery process reaches the beginning
+of the dynamic dependence graph for a context and the initial
+instances used by the parent task have been corrupted by
+mis-speculation, the runtime stops recovery within the 
+current context. It then elevates the recovery process to restarting
+the parent task with its enclosing context. We discuss the
+benefits of hierarchical recovery in further detail in 
+Section~\ref{subsec:hierarchicalrecovery}, but the same 
+process is applied to the parent task in order to restart it.
+The second condition that can cause the recovery process
+to fail within a context and be elevated to the parent task
+is if any of the tasks that need to be re-issued are 
+non-idempotent (see Section~\ref{subsec:qualifiers}). 
+Non-idempotent tasks have side effects that the runtime cannot
+reason about, requiring the the handling be elevated to 
+the parent task (possibly recursively triggering a restart
+of the entire program in some cases). In practice, most 
+Legion tasks are idempotent and only have side effects on
+logical regions about which the runtime can reason.
+
+While recovery may seem as if it can be very expensive, it
+is important to note that the performance of recovery is
+directly influenced by mapping decisions. Mapper calls are
+informed about when they are mapping speculative tasks. 
+Mappers then have a natural space-time trade-off to make
+when mapping speculative tasks. Mappers can choose to 
+re-use existing physical instances when mapping a speculative
+task that reduces memory usage, but at the potential cost
+of more-expensive (and deeper) recovery operations when
+mis-speculation occurs. Alternatively, mappers can prevent
+the corruption of physical instances for speculative execution
+by forcing the runtime to either create new instances or
+re-use instances based on the same speculative predicates.
+This will result in faster recovery, but at the cost of
+additional memory usage. Since this is a standard performance
+trade-off, we ensure that the mapper can directly make
+this decision without interference from the runtime.
+
+After the runtime determines that recovery can be done
+for a mis-speculated task, then all poisoned tasks, as well
+as any additional tasks needed to re-generate physical
+instances for the mis-speculated task, are re-issued 
+into the operation pipeline by the runtime. These operations
+are re-issued past the dependence analysis stage because
+re-computation of the dynamic dependence graph is unnecessary.
+Since no future values escape to the parent task until they
+are non-speculative, we know that the shape of the dynamic
+dependence graph is invariant under speculation. Therefore
+all operations have the same dependences as they did before.
+The only difference is that the predicate values may
+impact how the dynamic dependence graph is executed. Once
+all the tasks have been re-issued, then execution proceeds
+as if the mis-speculation had not occurred.
+
+
+\section{Resilience}
+\label{sec:resilience}
+One of the benefits of supporting speculation in Legion is
+that it enables a nearly free implementation of hierarchical
+resilience in Legion. The same machinery described in 
+Section~\ref{sec:speculation} for recovering from speculation
+can be used for recovering from both hard and soft faults.
+While there are a few additional features required
+to support fault tolerance, they have a minimal impact
+on performance. As with many fault
+tolerance mechanisms, additional memory will be required.
+
+% full node failures?
+We assume in this section that Legion is purely responsible
+for recovering from faults and not for detecting them. We
+will describe how Legion can handle many different kinds
+of faults reported at any of the hardware, operating system,
+or application. For the purposes of this discussion we detail
+how Legion handles faults that impact application data, and
+do not describe any mechanisms for handling faults that 
+impact the Legion runtime meta-data or execution. Handling
+faults within the runtime is left for future work.
+
+\subsection{Commit Pipeline Stage}
+\label{subsec:commit}
+Recall from Section~\ref{subsec:stages} that the final stage
+of the Legion pipeline is the {\em commit stage}. In a
+version of Legion that is not resilient, the commit stage
+is a no-op, allowing all operations to proceed immediately
+from completion to being retired. The commit stage is necessary
+for resilience as it prevents operations in the pipeline from 
+retiring when it is possible that they may still need
+to be re-issued due to a fault. In many ways, this stage
+is similar to the resolve speculation stage from 
+Section~\ref{sec:speculation}, except that the commit stage
+is performed after the completion stage. Placing the commit
+stage after the completion stage is important because it
+allows dependent operations to begin running (the completion
+event has triggered) and completes any future values making
+them available to the enclosing parent task. This decision
+reflects an important design concept: Legion prevents speculation
+from polluting a parent task's execution context, but provides
+no such guarantee for faults. The motivation behind this
+design decision is that speculation is likely to be common
+in Legion applications, while faults should be significantly
+less frequent.
+
+After an operation has finished the completion stage of the 
+pipeline, it progresses to the commit stage. There are three
+conditions under which an operation can finish the commit
+stage and retire. The first way that an operation can be
+committed is if the mapper determines that all the output
+region requirements have had physical instances placed in 
+memories of a sufficient degree of {\em hardness}. The low-level
+runtime assigns all memories a hardness factor that indicates
+their level of resilience. For example, a memory backed by
+a RAID array has a higher degree of hardness then a normal
+disk which has a higher degree of hardness than flash memory
+which has a higher degree of hardness than DRAM, etc. After
+each operation with output region requirements have been 
+mapped, the runtime invokes the {\tt post\_map\_operation}
+mapper call that asks the mapper to both set a minimum
+default hardness for each region requirement, and also permits
+the mapper to request additional copies of logical regions
+be made in hardened memories after the operations has completed. 
+
+In additional to being placed in hardened memories, the runtime
+also needs to validate that the data in the physical instances
+is valid. To validate the data, mappers can specify a
+validation task to be run using the physical instance that 
+must return a boolean indicating whether the data is validated.
+Alternatively, Legion tasks are responsible for checking their
+own input logical regions for inconsistencies. If a consuming
+task of a logical region (e.g. one with at least read-only
+privileges) completes without reporting an error (see 
+Section~\ref{subsec:faultreport} for details on reporting
+errors), then the runtime can conclude that the data generated
+by the task has been validated.
+
+If all of the region requirements for an operation have instances
+in a sufficiently hardened memory and they have all been 
+validated, then the runtime knows that it will never need to 
+re-execute the operation (because valid physical instances exist 
+for all the data), and therefore it can retire the operation. 
+If an instance is corrupted in a hardened memory and the operation 
+has already been retired, then the runtime will automatically invoke 
+the hierarchical recovery mechanism described in 
+Section~\ref{subsec:hierarchicalrecovery}.
+
+The second way that an operation can be retired is if all of the
+operations that depend on it have been retired. In 
+Section~\ref{sec:mapdepgraph}, we described how commit edges 
+were added from all operations to each of the predecessors on 
+which they held mapping dependences (i.e. commit edges are 
+reverse mapping dependences). When an operation commits, it
+triggers all of its commit edges, indicating to the predecessors
+of the operation that it will never need to be re-issued
+in order to recover from a fault. If at any point all commit
+edges for an operation have been satisfied, then the runtime
+knows that an operation will never need to re-issue and allows
+it to commit. Intuitively, commit edges create slices of the
+dynamic dependence graph that will never need to be re-issued 
+and can therefore be committed.
+
+The third and final way that an operation can be committed is
+that the mapper can explicitly direct the runtime to commit
+an operation. For each invocation of the 
+{\tt select\_tasks\_to\_schedule} mapper call, the runtime also
+makes an invocation of the {\tt select\_tasks\_to\_commit} mapper call that asks
+the mapper to identify any operations to commit early. The 
+need for early committing of tasks by the mapper is necessary
+to manage a trade-off between recovery time from faults with
+the size of the dynamic dependence graph for a context. 
+If the mapper makes no attempt to harden the results of 
+operations, then the dynamic dependence graph maintained by
+the runtime for recovery purposes can grow arbitrarily large.
+Since the decision about how much of the dynamic dependence
+graph to maintain is purely a performance decision, we 
+directly expose the decision using the {\tt select\_tasks\_to\_commit}
+mapper call. The mapper can choose to maintain a large 
+dynamic dependence graph for shorter recovery times, or it
+can eagerly prune the graph, possibly requiring a restart
+of the enclosing parent task if a task needs to be re-issued
+that has already been committed.
+
+\subsection{Fault Detection and Reporting}
+\label{subsec:faultreport}
+At the beginning of this section we scoped the problem of 
+resilience in Legion to only recovering from errors. We now
+describe how errors are reported to Legion and how recovery
+is performed. There are two kinds of faults that can be
+reported to the runtime: task faults and physical instance
+faults. Either of these faults can be the result of soft
+or hard faults in hardware or software. We now discuss the
+recovery process from each of these kinds of faults in turn.
+
+In the case of task failure, a hard or soft fault causes a task to fail.
+This might occur because of a hard fault where the hardware processor 
+running the task fails, or a soft fault such as a bit flip that changes
+the execution of the task and results in a failure. Regardless
+of the fault, the runtime is notified of the failure (either
+by the hardware or the operating system via a mechanism in the
+low-level runtime). When a task faults, the same recovery mechanism 
+described in Section~\ref{sec:speculation}, for recovering from 
+mis-speculated tasks is employed. This process prunes out any tasks 
+impacted by the fault and re-issues any operations necessary for 
+recomputing the starting regions for the task that faulted.
+If, during the recovery process, an operation that needs to 
+be re-issued has already been committed, then hierarchical
+recovery is invoked (see Section~\ref{subsec:hierarchicalrecovery}).
+
+The second kind of fault handled by the Legion runtime is 
+physical instance faults. This kind of fault is a corruption
+of the data stored in a physical instance by either a soft
+or a hard fault, possibly occurring while no tasks are accessing
+the data in the physical instance. Physical instance faults can be 
+reported from any level of the software stack. If the instance resides 
+in a DRAM memory with error detection codes, then the hardware
+might report a fault. If the instance is in a software managed
+memory such as a disk, then the operations system might
+trigger a fault during a consistency check (e.g. RAID).
+Finally, the application can report invalid input data
+for a physical instance using a runtime call invoked during
+task execution\footnote{This final fault reporting mechanism is
+also used for inferring the valid property discussed in 
+Section~\ref{subsec:commit}.}. Regardless of the fault
+reporting mechanism, the runtime examines the version number
+of the physical instance. Unless the reporting mechanism
+explicitly specifies the exact range of invalidated data,
+the runtime conservatively assumes that the entire physical
+instances has been corrupted. If a range for invalid
+data in the physical instances is specified, the runtime
+can more precisely scope the consequences of the corrupted
+data in terms of logical region(s) of the physical instance.
+The runtime then determines all the consuming operations that 
+have mapped the current version number of the physical instance 
+for their execution. (Note that the current version number is
+different from the most-recent version number. The most recent
+version number reflects the farthest point of the mapping
+process.) All operations using the current version number
+are determined to have faulted and the recovery mechanism
+from Section~\ref{sec:speculation} is again employed. If one
+of the faulted operations has already been committed (i.e.
+because the mapper committed it early), then it cannot
+be recovered and the hierarchical recovery mechanism is invoked.
+
+\subsection{Hierarchical Recovery}
+\label{subsec:hierarchicalrecovery}
+One of the important properties of the recovery mechanism in
+Legion is that it is hierarchical. If at any point a task
+can no longer be recovered, the parent task faults and 
+the recovery mechanism is invoked on the parent task within
+the grandparent task context. This can be applied recursively
+whenever necessary to ensure that recovery from faults is
+possible. In the worst case scenario, the entire program
+will be restarted. While the Legion approach does not
+guarantee forward progress, it does guarantee sound execution
+of Legion programs that will continue recovering from faults
+as they occur.
+
+Another important benefit of hierarchical recovery is
+that it operates in a distributed fashion. Unlike global
+checkpoint and recovery mechanisms that require all 
+nodes to checkpoint the majority of data simultaneously
+before continuing, hierarchical recovery allows checkpointing
+to be done independently on individual tasks without
+any synchronization. Furthermore, the decision about which
+data to checkpoint is completely under control by the
+mapper objects that specify which instances have checkpoints
+made, and to which memories. By taking a hierarchical 
+approach and making all performance decisions related to
+resilience mapper-controlled, the Legion approach 
+to resiliency has the potential to be significantly 
+more scalable.
+

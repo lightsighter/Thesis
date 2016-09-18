@@ -1,0 +1,865 @@
+
+% Due Date: 7/9/14
+
+\chapter{The Legion Mapping Interface}
+\label{chapter:mapping}
+The Legion mapping interface is the mechanism by which
+a machine independent Legion program is targeted at a 
+specific hardware architecture. While we have mentioned 
+some of the Legion mapping calls in earlier chapters of this
+thesis, we have yet to fully cover all the details of the
+mapping interface. In this chapter we give an overview of 
+most of the features of the 
+mapping interface except those specific to relaxed coherence
+modes and speculation/resilience that are covered in 
+Chapters~\ref{chapter:relaxed} and \ref{chapter:resilience}
+respectively. We also provide a description of how the 
+default mapper interface provides a useful initial
+implementation of this interface.
+
+Listing~\ref{lst:mapinterface} contains a C++ instantiation
+of the mapper interface as an abstract class. Recall from 
+Chapter~\ref{chapter:arch} that the interface is actually 
+a reverse interface in the sense that the Legion runtime
+invokes the functions of the mapper interface whenever
+performance decisions need to be made.  It is the 
+responsibility of the mapper object to answer the query.
+In order to handle queries, mappers provide results by
+mutating fields on the objects passed to them. For brevity
+we do not show declarations for these objects here.
+
+There are two important observations to make about the
+interface presented in Listing~\ref{lst:mapinterface}.
+First, because the interface is a class, each mapper
+will be created as a separate object. Having mappers be
+objects is important because it allows them to be
+stateful, and to use the results of previous mapping
+queries from the runtime as part of the process of 
+answering later queries.  Second, all of the methods
+of the mapper interface are virtual. This makes creating
+specialized mappers easy as only modified methods need
+to be overridden to create a new mapper from an existing 
+implementation. We now detail the semantics of each
+of the mapping calls in Listing~\ref{lst:mapinterface}
+in the remaining sections.
+
+\lstset{
+  captionpos=b,
+  language=C++,
+  basicstyle=\scriptsize,
+  numbers=left,
+  numberstyle=\tiny,
+  columns=fullflexible,
+  stepnumber=1,
+  escapechar=\#,
+  keepspaces=true,
+  literate={<}{{$\langle$}}1 {>}{{$\rangle$}}1,
+}
+\begin{lstlisting}[float,floatplacement=h,label={lst:mapinterface},caption={Abstract C++ class declaration of the mapper interface.}]
+class Mapper {
+public:
+  Mapper(LegionRuntime *rt);
+  virtual ~Mapper(void);
+public:
+  virtual void select_task_options(Task *task) = 0;
+  virtual void select_tasks_to_schedule(
+                const std::list<Task*> &ready_tasks) = 0;
+public:
+  virtual void target_task_steal(const std::set<Processor> &blacklist,
+                                 std::set<Processor> &target) = 0;
+  virtual void permit_task_steal(Processor thief,
+                                 const std::vector<const Task*> &tasks,
+                                 std::set<const Task*> &to_steal) = 0;
+public:
+  virtual void slice_domain(const Task *task, const Domain &domain,
+                            std::vector<DomainSplit> &slices) = 0;
+public:
+  virtual bool premap_task(Task *task) = 0;
+  virtual void select_task_variant(Task *task) = 0;
+  virtual bool map_task(Task *task) = 0;
+  virtual void postmap_task(Task *task) = 0;
+public:
+  virtual bool map_inline(Inline *inline_op) = 0;
+  virtual bool map_copy(Copy *copy_op) = 0;
+  virtual bool map_must_epoch(const std::vector<Task*> &tasks,
+                              const std::vector<MappingConstraint> &constraints,
+                              MappingTagID tag) = 0;
+public:
+  virtual void notify_mapping_result(const Mappable *mappable) = 0;
+  virtual void notify_mapping_failed(const Mappable *mappable) = 0;
+  virtual void notify_profiling_info(const Task *task) = 0;
+public:
+  virtual bool rank_close_targets(Close *close_op) = 0;
+  virtual void rank_copy_sources(const Mappable *mappable,
+                                 const std::set<Memory> &current_instances,
+                                 Memory dst_mem, 
+                                 std::vector<Memory> &chosen_order) = 0;
+public:
+  virtual bool speculate_on_predicate(const Mappable *mappable,
+                                      bool &speculative_value) = 0;
+public:
+  virtual int get_tunable_value(const Task *task, TunableID tid,
+                                MappingTagID tag) = 0;
+public:
+  virtual void handle_message(Processor source, 
+                              const void *message, size_t length) = 0;
+};
+\end{lstlisting}
+
+\section{Mapping Tasks and Regions}
+\label{sec:mapbasic}
+The primary purpose of the Legion mapper is to decide
+how tasks are assigned to processors and how each of 
+the region requirements requested by those tasks are
+mapped onto specific memories in the memory hierarchy.
+We first begin by describing the process by which tasks
+are selected for execution and how mappers can choose
+which mapper instance is responsible for actually mapping
+the task (Section~\ref{subsec:mapselect}). In order to
+map selected tasks, all mapper instances require an 
+interface for introspecting the underlying hardware to
+discover the system architecture; we discuss the
+interface for performing this introspection and how it
+is used to map individual tasks in 
+Section~\ref{subsec:procandmem}. We detail how tasks are
+placed and mapped in Sections~\ref{subsec:mapselect} and
+\ref{subsec:maptask} respectively.
+Sections~\ref{subsec:layout} and \ref{subsec:generators}
+describe how mappers can specify region instance layouts
+and the implications for selecting different task variants
+that can correctly use the chosen layouts. The use of
+priorities for addressing critical path issues is covered
+in Section~\ref{subsec:priorities}.
+
+\subsection{Processors and Memories}
+\label{subsec:procandmem}
+In order to make decisions about how tasks and regions
+are mapped, each mapper implementation needs a way to
+query the runtime about the shape of the underlying 
+hardware.  To provide this functionality, the runtime
+supports a singleton {\em machine} object on every node.
+The machine object provides methods for finding all 
+processors and memory locations throughout the entire
+system, including processors and memories on remote 
+nodes. It is important that all processors and memories
+be known on each node so that a task can be sent to any
+processor or mapped onto any remote node.
+
+In addition to providing a means for discovering the names
+of all processors and memories in the system, the 
+machine object also provides a means for querying 
+important information about the various resources. For
+example, the machine object allows mappers to query for the
+kind of processor and memory.  There are three kinds of
+processors: latency-optimized cores (CPUs), 
+throughput-optimized cores (GPUs), and utility processors
+(CPU cores for performing runtime meta-work). There are
+many more types of memories than can be listed here, but
+several examples include system memory (DRAM), framebuffer 
+memory (GPU GDDR), and registered memory (pinned memory 
+that can be directly accessed by NIC hardware). By 
+providing a means for classifying memories, mappers can 
+be better informed about how to
+best approach mapping for a specific architecture.
+
+To further aid in the mapper's decision making process, 
+the machine object provides an interface for querying 
+the affinity between various processors and memories. 
+There are two kinds of affinity relationships:
+processor-memory affinity and memory-memory affinity.
+Processor-memory affinity exists when a processor can
+directly perform reads and writes to a memory using
+load and store instructions. Memory-memory affinity 
+exists whenever there is a direct data movement
+path between the two memories. Affinity relationships
+are also annotated with the expected latency and 
+bandwidth for performing operations between the 
+different components, giving mappers some indication
+of the expected performance of different components.
+
+In addition to providing mappers with a way to inspect
+the system through the machine object, mappers can also
+organize some components into collections.  For example,
+instead of mapping a task onto a specific low-level
+processor, a mapper might wish to map it onto a collection
+of processors so that the first processor with additional
+cycles in the collection can perform the task. To makes
+this possible, the low-level runtime supports the 
+creation of {\em processor groups}.  Processor groups
+must contain processors that all originate from the same
+node and all have the same kind.  The creation of a 
+processor group also entails the creation of a common
+work-queue from which all the processors in the group
+will pull. For example, an application might wish to
+create a processor groups for all the processors that 
+share a NUMA domain since it is likely a task mapped
+onto this processor group will run equally fast on 
+any of the processors in the group. Tasks mapped onto 
+processor groups must always use memories that are 
+visible from all processors.  The runtime can detect
+violations of this requirement and will cause the
+task mapping to fail if they occur.
+
+\subsection{Selecting Tasks and Mapping Locations}
+\label{subsec:mapselect}
+
+Recall from Section~\ref{subsec:mapperinst} that one 
+instance of every kind of mapper is instantiated for
+each application processor in the machine (CPUs and 
+GPUs, but not utility processors). Once the dependence 
+analysis and premapping stages of a task's execution are 
+complete, the task is placed in the ready queue for the 
+mapper that manages the processor on which the parent task
+is executing\footnote{If it is an index space the task will also
+be sliced first with slices placed in the target ready
+queues, see Section~\ref{subsec:indexdist}.}. Whenever
+tasks are in the ready queue, the mapper is queried to
+select tasks that it would like to choose to map by
+the {\tt select\_tasks\_to\_schedule} mapper call. The
+set of tasks that are ready to map are given in an
+ordered list with tasks appearing earlier in the list
+having been in the list the longest. The mapper marks
+which tasks it wants to map next.  The mapper can also
+select not to map any tasks.  This is a useful approach
+in two cases. First, the mapper might determine that
+it has mapped sufficiently far into the future, and 
+wants to keep more tasks on the ready queue and therefore
+available for stealing.  Second, in the case of a
+debugging mapper, it may be useful to pause execution
+under some circumstances.  If all mappers stop mapping
+tasks, then the application is temporarily halted\footnote{
+Interestingly, this can result in a certain class of
+mapper bugs that make the application to appear to 
+hang. The default mapper automatically guards against
+this case, but custom mappers must be careful to avoid
+this case themselves.}.
+
+The default mapper supports two modes for picking tasks
+to execute. These two modes correspond to different
+approaches for traversing the tree of tasks. In depth-first 
+mode, the default mapper traverses the task tree in a
+depth-first manner, performing to select tasks that 
+have the largest depths even if they have been in the
+queue a shorter time.  In breadth-first mode, the
+default mapper always selects the tasks that have been
+in the queue the longest to map. In general, depth-first
+mode optimizes for latency while breadth-first mode 
+optimizes for throughput.  Our default mapper currently
+optimizes for throughput by performing breadth-first
+traversal of the tree of tasks, but can be easily
+switched to a depth-first traversal mode with a 
+command line flag that will be observed by all 
+default mapper instances.
+
+As part of selecting which tasks to map, the default
+mapper can also make two final decisions for each
+task regarding which processor will perform the mapping
+and whether the task will be mapped {\em locally} or
+{\em remotely}. There are three scenarios.  First, a task
+can be aimed at the current processor being managed
+by the mapper, in which case it is guaranteed to be mapped
+locally. Second, the task can be aimed at a remote processor
+and be marked to map remotely.  In this case the task
+is sent to the remote processor's mapper and placed in
+its ready queue where it can either be mapped or sent to
+another processor by the mapper of the remote processor.
+Third, the task can be sent to a remote processor and 
+mapped locally. The current mapper will
+then map the task on the local node and then send the 
+result to the remote node where the task is immediately
+launched onto the processor foregoing being placed in 
+the remote processor's mapper's ready queue. The tradeoffs
+between mapping locally and mapping remotely are 
+discussed in detail in Section~\ref{sec:taskdist}.
+
+\subsection{Mapping a Task}
+\label{subsec:maptask}
+Once a task is ready to be mapped (either locally or
+remotely), the {\tt map\_task} mapping function is invoked.
+At this point the target processor of the task has
+already been selected, and it is the responsibility
+of the mapper to create a ranking of memories in which
+to attempt to place physical instances for each region
+requirement. A separate ranking of memories can be
+specified for each of the region requirements, giving
+the mapper the flexibility to specify which data should
+be placed close to the processor and which data can
+be left further away. To aid the mapper in the decision
+making process, the runtime also provides information
+for each region requirement about available physical
+instances as well as which fields are already valid for 
+these physical instances.
+
+Our implementation of the {\tt map\_task} method in
+the default mapper relies on several very simple heuristics 
+for generating mappings for real applications. First, in 
+order to  select a processor for a given task, the mapper 
+checks the variants available for the task to see which kinds
+of processors are supported.  If a variant is available
+for GPU processors, then the default mapper will attempt
+to map the task onto a GPU processor\footnote{Our default
+mapper implementation skews towards optimizing for 
+throughput instead of latency since most Legion 
+applications are limited by throughput.}. If only
+CPU variants of the task are available, then the default
+mapper will target a CPU processor. If the task is
+an individual task, the default mapper will elect to
+keep the task on the origin processor (or a nearby GPU
+on the same node if a task has a GPU variant) in order
+to encourage locality of data with the parent task. 
+When stealing is enabled (Section~\ref{sec:loadbalance})
+these individual tasks can be pulled by other processors,
+however our initial preference for locality is 
+important for reducing data movement.
+If the task is an index space of points, the default
+mapper round-robins tasks across all of the processors
+in the machine of the chosen kind (GPUs if a variant
+exists, otherwise CPUs). This approach is designed
+to foster load balancing for index space tasks that 
+routinely launch at least as many tasks as there are
+processors in the machine.
+
+Once the default mapper has selected a specific processor
+for a task, then it proceeds to assign rankings for each
+of the region requirements requested by the task. The 
+default mapper initially discovers the set of all the 
+memories visible from the target  processor. The default 
+mapper then ranks the memories based on the bandwidth 
+available from the target processor with those having 
+higher bandwidth being ranked better. The default mapper 
+bubbles memories that already have valid instances 
+for the data to the top, allowing for re-use of existing 
+instances wherever possible and improving locality.
+This process is applied for each of the region requirements
+requested by the task, allowing the default mapper
+to create a customized mapping decision for each region
+based on both the performance of the existing hardware
+as well as the existing state of the data in the memory
+hierarchy.
+
+\subsection{Physical Instance Layout}
+\label{subsec:layout}
+In addition to specifying a ranking of target memories
+for each region requirement, the {\tt map\_task} mapping
+call also gives the mapper the ability to place constraints
+on the layout of data for each physical instance. These
+constraints take several forms.
+\begin{itemize}
+\item Field Ordering - constraints on the ordering of fields
+                       within the physical instance.
+\item Index Space Linearization - constraints on how the index
+                       space is linearized into memory including
+                       ordering of dimensions as well the function
+                       that must be used for linearizing domains
+                       (e.g. to support z-order curves, etc.).
+\item Interleaving - control how fields and index spaces are
+                     interleaved for data layout to support
+                     patterns such as array-of-structs (AOS),
+                     struct-of-arrays (SOA), and hybrid layouts
+                     as well as interleaving of dimensions with
+                     fields (e.g. 2-D slices of a 3-D index space
+                     with each slice containing two fields in
+                     AOS format).
+\end{itemize}
+These different kinds of constraints give mappers full control
+over the layout of data for physical instances and provide
+no limitations of the kinds of data layouts that are supported.
+Constraints are specified as sets and the relatively simple
+nature of the constraints (no arithmetic), allow for easy testing
+of set constraint satisfaction and entailment. To help the mapper
+in picking constraints, the runtime also supplies the mapper with
+the constraints that dictated the layout of the existing physical
+instances that can be reused for each region requirement.
+
+The default mapper uses a simple heuristic for determining
+how to layout data. Data for GPU processors is always laid out
+in SOA format in order to guarantee memory coalescing of global
+loads\footnote{Note SOA format also requires no ordering constraints
+on fields.}. For CPU processors, the mapper checks to see whether
+there exists variants capable of using vectorized layouts or
+there exists a variant generator (see Section~\ref{subsec:generators})
+capable of generating vectorized CPU code. If either condition is
+met then the default mapper specifies a hybrid layout that interleaves
+all fields with a blocking factor equal to the width of the 
+vector units on the target CPU.  If vectors are not supported
+and no variant generator exists, all physical instances are
+assigned variants for generating AOS physical instances that 
+optimize for linear striding through memory for CPU prefetch
+engines.
+
+\subsection{Task Variants and Generators}
+\label{subsec:generators}
+One important property guaranteed by the mapping interface is
+that no mapping decision will ever impact the correctness of
+a Legion application. To guarantee this property, the runtime
+is responsible for validating the selection of a task variant
+to execute based on the chosen processor and the selected
+physical instances along with their layout constraints. When
+variants are registered with the runtime, they also register
+constraints on their execution (e.g. processor kind and physical
+instance layout constraints). After all of the mapping 
+decisions have been made, the runtime iterates over the set
+of variants for the given task to find the set of variants whose 
+constraints can be satisfied by the chosen
+processor and physical instances. There are three possibilities
+for this set.  First, the set can be empty in which case
+no variant can be selected.  Under these circumstances the 
+runtime triggers a mapping failure and asks the mapper to 
+retry the mapping (see Section~\ref{sec:feedback} for more
+information on mapper feedback calls).  Second, the set can contain a single
+variant, in which case, the runtime immediately selects
+this variant as the one to use and runs the task.  Finally,
+in the third case, there can be multiple valid variants
+that can be used. In this circumstance, the runtime 
+invokes the {\tt select\_task\_variant} mapper call to 
+ask the mapper which variant it would prefer to use.
+Whenever the default mapper encounters multiple valid variants
+it picks the one with the largest number of constraints 
+based on the assumption that a more highly constrained
+variant has been further specialized and is therefore likely
+to achieve higher performance.
+
+Due to the large potential design space of variants for a
+task (often hundreds to thousands based on the cross-product
+of processor kinds and various instance layout options), it is 
+unreasonable to expect authors of Legion programs (or even 
+higher level programming systems such as DSL compilers) to emit 
+all combinations of these task variants up front. Instead,
+Legion allows applications to register task {\em generators}.
+Task generators are Lua functions, written within the 
+Lua-Terra meta-programming framework \cite{Terra13},
+that can emit Terra versions of leaf tasks based on an
+input set of constraints. Once generated, the Terra function
+is then JIT compiled and can be used as a Legion task.
+If a task generator function is registered with the 
+runtime, it will be invoked any time an existing variant 
+does not exist for a given set of constraints. The 
+generator is responsible for emitting a Terra task based
+on the set of processor and data layout constraints
+that have been passed to it by the runtime.  The generator
+can also return an additional set of constraints
+that specify the conditions that must be met
+for the generated variant to be used\footnote{This set
+of constraints can be a subset of the constraints passed
+to the generator function as the generator function can 
+be used to emit more general code that satisfies
+the necessary constraints and also may satisfy other
+constraints as well.}. The runtime then memoizes the 
+variant along with the necessary constraints for using 
+it so that it can be re-used where possible
+for future task executions.
+
+It is important to note that generator functions also
+provide a useful level of indirection for DSL compilers
+that target Legion.  Generator functions can base
+their Terra code generation off of any intermediate
+representation that they choose, including, but
+not limited to, strings, assembly code, LLVM IR, or
+Terra abstract syntax trees. This level of indirection
+decouples the Legion runtime interface from any one
+DSL compiler infrastructure, allowing DSL compilers
+to be built in any framework, as long as they can 
+emit Lua-Terra generator functions.
+
+\subsection{Addressing Critical Paths with Priorities}
+\label{subsec:priorities}
+
+The last aspect of mapping a task is determining the
+{\em priority} for a task.  While most applications
+written for Legion are limited by throughput of 
+tasks or data movement, there are still phases in
+many of these applications that contain a critical
+path that impacts the performance of the overall
+application.  Under these circumstances it is important
+that mappers have a means for indicating to the
+runtime that tasks and copies are on a potentially
+critical path to ensure that the execution of these
+operations is not obstructed by non-critical 
+operations. To make this possible, the mapping interface
+is allowed to assign an integer to a task that 
+indicates its priority. By default, the priority
+for all operations is set to zero. Mappers can assign
+a positive integer to increase priority or a negative
+integer to decrease priority. One interesting open
+problem is how to normalize between priorities
+assigned by different mappers.  For example, one
+mapper might assign priorities on a scale from $-10$ 
+to $10$, while another uses a scale from $-100$ to 
+$100$. For such cases, it would be beneficial
+for the two priority scales to be equated and normalized
+to ensure that tasks are scheduled appropriately.
+Currently, the default mapper makes no attempt to
+guess priorities for tasks and assigns the default 
+zero priority to all operations.
+
+The priority that is assigned to a task applies to both
+the execution of the task as well as any mapping 
+operations that are generated as part of mapping the
+task.  This ensures that data movement that may 
+reside on a critical path is also prioritized.
+
+
+\section{Load Balancing}
+\label{sec:loadbalance}
+For many of the dynamic applications for which 
+Legion is designed, load balancing is an important 
+performance issue.  Legion supports several different
+features for allowing mappers to customize load
+balance at runtime. These features can be 
+categorized into two areas: support for load
+balancing within a node and load balancing 
+between nodes. We briefly describe how load
+balancing within a node can be achieved in
+Section~\ref{subsec:procgroups} and then describe
+the two features for managing load balancing
+between nodes in Sections~\ref{subsec:stealing}
+and \ref{subsec:mapcom} respectively.
+
+\subsection{Processor Groups}
+\label{subsec:procgroups}
+To support load balancing within a node, Legion
+permits mappers to create {\em processor groups}.
+A processor group is effectively a name for a
+task queue that is shared between a set of
+processors. Tasks that are mapped to a processor
+group are placed in the task queue for the processor
+group. As soon as any processor in the processor
+group is available for executing a task, it will
+pull a task off the queue and execute it. Using
+processor groups, mappers can easily load balance
+task execution across a set of processors.
+
+The runtime does enforce three requirements on the
+use of processor groups.  First, all processors
+in a processor group must be on the same node.
+The reason for this is the processor group must
+share a common task queue data structure that 
+cannot be implemented in a distributed environment
+without considerable communication overhead. Second,
+all processors in a processor group must be of the
+same processor kind. This is necessary to ensure
+that tasks have selected the proper variants for
+running on the processor group. Finally, all 
+regions that have been mapped for tasks launched
+on a processor group must be visible to all 
+processors in the processor group. This is 
+necessary to ensure that when the task is run
+it will run correctly regardless of the processor
+that the task is assigned.
+
+\subsection{Task Stealing}
+\label{subsec:stealing}
+There are two possible mechanisms for performing
+inter-node load balancing: one based on a 
+{\em pull} methodology and one based on {\em push}
+methodology.  In this section, we describe how
+task stealing can be used to pull work between 
+nodes while the next section covers how work can be
+pushed between nodes.
+
+To support task stealing, as part of every scheduler
+invocation, the Legion runtime invokes the 
+{\tt target\_task\_steal} mapper call, which 
+queries each mapper to see if it would like to
+target any other processors in the system for
+task stealing. The mapper is free to target no
+processor for stealing or to target any subset
+of processors. If steal requests are made, the 
+runtime sends the necessary messages to the 
+same kind of mappers on the remote node. When
+these requests arrive, they trigger an invocation
+of the {\tt permit\_task\_steal} mapper call.
+In Legion, tasks are not stolen automatically.
+Mappers that own tasks must explicitly permit
+them to be stolen. The reason for this is that
+most task stealing systems operate in shared
+memory environments (e.g. \cite{Cilk98}), and
+there is minimal data movement as a result of
+stealing.  
+
+In Legion, stealing primarily occurs
+between nodes, and the cost of moving data is
+much higher.  We therefore give the owning mapper
+the prerogative to reject steal requests. The
+receiving node of a steal request is only
+permitted to allow tasks currently in its
+ready-queue to be stolen.  Tasks that have
+been mapped onto a processor are not eligible
+for stealing. If a task is permitted to be
+stolen, then its meta-data is moved to the node
+where the steal request originated, and the
+task itself is added to the ready queue of
+the requester mapper. It is important to note
+that this approach only allows task stealing
+between mappers of the same kind, which guarantees
+that only a mapper of the kind assigned to the
+task will perform the mapping.
+
+In order to avoid communication overheads 
+associated with repeated steal attempts, the
+runtime tracks which steal requests fail.
+If a steal request from processor $P_1$ to
+processor $P_2$ fails for a mapper of kind
+$M$, then $P_2$ is added to the blacklist
+for mapper $M$ of processor $P_1$. The blacklist
+prevents any additional steal requests from
+$P_1$ being sent to $P_2$. At the same time,
+the runtime keeps track of failed steal
+requests for $P_2$. As soon as new tasks are
+added to the ready queue of mapper $M$ on 
+$P_2$, then an advertisement is sent to 
+processor mapper $M$ of $P_1$ to alert it
+to the new tasks that may be eligible for
+stealing.  The advertisement then clears
+$P_2$ from the blacklist of $P_1$ for mapper
+$M$. The idea behind this approach
+is that mappers are unlikely to permit stealing
+of tasks that were already rejected for 
+stealing once.  However, with new work, the
+mapper has acquired additional execution
+responsibility and may make a different
+mapping decision.
+
+One important detail about stealing is that
+stealing is permitted within a node as well
+as between nodes. However, within a node
+the more effective approach is likely to be
+the use of processor groups as they provide
+a finer-grained approach to load balancing
+that works better within a single node.
+
+Since the default mapper has no information about
+the structure of an application, in normal
+conditions it avoids stealing.  Stealing is easily 
+enabled with a command line flag.  When enabled,
+the default mappers on various processors randomly
+choose a processor from which to attempt to steal.
+Random choices avoid stampedes where all mappers
+attempt to steal from the same processor at
+the same time. Clearly there is room for a more
+advanced stealing scheme, but for now it is
+left for future work.
+
+\subsection{Mapper Communication}
+\label{subsec:mapcom}
+The other approach to performing load balancing
+is to implement a push-based model where mappers
+coordinate to balance load. To allow mappers to
+coordinate with each other, the mapper interface
+provides a mechanism for mappers to send messages
+to other mappers of the same kind on other
+processors. A message consists of a pointer to an
+untyped buffer and a size of the number of bytes
+to copy.  The runtime makes a copy of this buffer
+and transmits it to the target node.  On the
+target node the runtime invokes the message 
+handler mapper call {\tt handle\_message}. Mappers
+are permitted to send messages from inside
+of any mapper call including the message handler
+mapper call. 
+
+Using messages, mappers of the same kind can
+orchestrate dynamic load balancing patterns that
+can be re-used for long epochs of application
+execution. For example, in an adaptive mesh
+refinement code, a custom mapper implementation
+could have mappers communicate the load of tasks
+that they receive after each refinement.  Based
+on load information for different processors,
+each mapper can independently compute a load
+balancing scheme and determine where to send all
+the tasks it is initially responsible.  The
+mappers can memoize this result and re-use it
+until a new refinement occurs or an old refinement
+is deleted. The granularity at which load balancing
+schemes are computed will vary with the size of
+the machine and the amount of work being generated,
+but these kinds of performance considerations are
+explicitly left to the mapper by design.
+
+
+\section{Mapper Feedback}
+\label{sec:feedback}
+One of the most important aspects of the mapper
+interface is that it contain mechanisms for mapper
+objects to either receive or request feedback
+about how the application is actually mapped
+onto the target architecture. Without this feature,
+mappers would be able to make decisions that
+affect performance, but would have no mechanism
+with which to reason about how those decisions
+impacted performance. In this section we cover
+the aspects of the mapper interface that permit
+mapper objects to determine how mapping
+decisions are impacting application performance.
+
+\subsection{Mapping Results}
+\label{subsec:mapresults}
+The first way that mappers can receive feedback
+about mapping decisions is through the 
+{\tt notify\_mapping\_result} and 
+{\tt notify\_mapping\_failure} mapper calls.
+Anytime that a task, copy, or inline mapping
+fails to map (usually because physical instances
+for the requested regions could not be 
+allocated) the runtime notifies the mapper that
+made the mapping decisions by invoking the
+{\tt notify\_mapping\_failure} mapping call.
+This call passes a pointer to the operation
+that failed to map.  The runtime annotates
+all of the region requirements for the operation
+indicating whether they succeeded or failed
+to map. This mapper call is a passive function
+in that the mapper has no responsibility regarding
+the operation (it is immediately added back into
+the ready queue by the runtime), but the mapper
+object can record the result and use it the
+next time the operation attempts to map.
+
+To further gain insight into how mapping decisions
+impact operation performance, mappers can request 
+the runtime notify them when operations are successfully 
+mapped using the {\tt notify\_mapping\_result} mapper 
+call. Each of the {\tt map\_task}, {\tt map\_copy}, and
+{\tt map\_inline} mapper calls require the mapper
+to return a boolean indicating whether they would
+like to be notified of the mapping result if the
+mapping succeeds. If the mapper returns {\tt true}
+then the runtime calls {\tt notify\_mapping\_result}
+if the mapping for that operation succeeds.  The
+runtime annotates each region requirement of the 
+operation with the name of the physical instance
+that was mapped and the memory in which it was
+located. Mappers can then record this information
+and use it in conjunction with the profiling 
+information for a task (described in 
+Section~\ref{subsec:profiling}) to gauge how the
+resulting mapping impacted performance.  Mappers
+can then use this information when mapping
+future instances of the task.
+
+\subsection{Performance Profiling}
+\label{subsec:profiling}
+While knowledge about how tasks and other operations
+are mapped is a necessary condition for understanding the
+performance of an application, it is not sufficient.
+Mappers also need access to profiling information
+to understand the performance implications of
+mapping results. The runtime therefore provides
+a mechanism for allowing mappers to request profiling
+results for tasks by setting the {\tt profile\_task}
+flag in the {\tt select\_task\_options} call. 
+Setting this flag indicates to the runtime to check
+the profiling options that mappers can request for
+a task in the {\tt ProfilingOptions} structure that
+is available for all task instances. By setting flags
+in this structure, mappers can ask for profiling 
+options including the execution time of a task,
+total execution time of a task and its children,
+and hardware instruction and memory counters such
+as loads and stores issued and cache hits/misses.
+After the task has completed, the runtime fills in 
+the requested fields in the {\tt ProfilingOptions}
+data structure and invokes the {\tt notify\_profiling\_info}
+mapper call to report the profiling results. By
+coupling these results with the mapping decision
+results reported by the mapper calls described in
+Section~\ref{subsec:mapresults}, mappers can infer
+the performance effects that different mapping
+decisions might have on performance. Profiling information
+closes the loop in the mapping process, giving 
+mappers the ability to drive future mapping
+decisions based on the performance of previous
+mapping results.
+
+\subsection{Introspecting Machine State}
+\label{subsec:introspection}
+While performance is one metric by which mappers might
+choose to make mapping decisions, another is resource
+utilization. For example, a mapper might opt to 
+omit a specific memory from a ranking for a region
+requirement in the {\tt map\_task} mapping call because
+the memory is nearly full, and the mapper knows that
+the space needs to be reserved for a later task.
+Discerning such information requires mappers to 
+query state information about different kinds of 
+resources in the system. To make this possible, as
+part of the mapper interface the runtime provides
+calls for mappers to inquire about the state of
+different resources.
+
+The first resource that mappers can query is the 
+current usage of different memories. Mappers can
+ask the runtime how much memory is already allocated
+or already free within a given memory. The result
+of this call should be interpreted as a point sample
+and doesn't guarantee that the same amount of space
+will be available in the immediate future. The reason
+for this is that allocations in memories are handled
+by the low-level runtime.  Consequently there may
+be other tasks from both the same node as well as 
+remote nodes that may be issuing allocation requests
+as part of their mapping process to the same memory
+in parallel. However, by using this query, mappers
+can gain insight into the underlying state of 
+different memories.
+
+The second resource that mappers can query is the 
+current number of outstanding tasks mapped onto
+different processors. This metric gives an 
+indication as to the current workload of different
+processors, allowing mappers to do a better
+job of load balancing. Similar to the memory
+usage query, this query should always be interpreted
+as a sample that is subject to change immediately
+as other operations may be mapped onto the 
+processors in parallel.
+
+While the runtime currently only supports querying
+these two resources, there is significant opportunity
+to include profiling for additional resources. For
+example, the runtime routinely knows that copy
+operations are pending which should provide sufficient
+information to gauge future load on data movement
+pathways such as interconnect pipes and PCI-Express
+buses. While the implementation of mappers that could
+leverage this information is some ways off, it is
+likely that intelligent future mappers will be capable
+of leveraging this information to achieve higher
+performance.
+
+Optimizing for resource usage is important, but also
+very difficult to do locally by individual mappers
+making mapping decisions for a single operation at
+a time. As part of future work we plan to investigate
+mechanisms for mapping many operations together as
+groups. This would allow for mappers to better balance
+trade-offs for resource usage and to make better
+global decisions with additional information. Mapping
+operations in groups would also allow for other 
+interesting optimizations such as fusing operations that 
+could reduce resource utilization, and allow dynamic program
+analysis in the Lua-Terra framework to further optimize
+generated code.
+
+\subsection{Managing Deferred Execution}
+\label{subsec:mappingdeferred}
+The final area where the mapper can receive feedback
+about the state of an application is through the 
+dynamic data flow graph. Legion makes available the 
+input and output dependences for all operations,
+allowing the mapper to explore the same of the
+dynamic dataflow graph. The runtime also provides a
+mechanism for mappers to query which operations have
+already been mapped and which ones are still 
+un-mapped.  By combining access to the shape of the
+graph along with profiling information, mappers can
+infer critical paths that are important for assigning
+priorities. Furthermore, by monitoring the location
+of the wavefront of mapped tasks within the graph,
+mappers can determine how far ahead of actual
+application execution mapping is occurring, thereby
+giving the mapper the feedback necessary to 
+accurately manage deferred execution.
+
+

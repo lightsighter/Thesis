@@ -1,0 +1,55 @@
+
+\documentclass[12pt]{report}
+
+\usepackage[online]{suthesis-2e}
+\usepackage{amsmath}
+%\usepackage{amsthm}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{arrows,automata,positioning}
+%\usepackage{subfigure}
+\usepackage{multirow}
+%\usepackage{pgfplots}
+\usepackage{booktabs}
+\usepackage{dcolumn}
+\usepackage{cancel}
+\usepackage{graphics}
+%\usepackage{pgfplots}
+\usepackage{subfig}
+\usepackage{url}
+\usepackage{ifmtarg}
+\usepackage{bm}
+\usepackage[numbers]{natbib}
+
+\title{Legion: Programming Distributed Heterogeneous Architectures with Logical Regions}
+\author{Michael Edward Bauer}
+%\dept{} % default is Computer Science, uncomment for other departments
+\principaladviser{Alexander Aiken}
+% \coprincipaladvisor{}
+\firstreader{William Dally}
+\secondreader{Patrick Hanrahan}
+
+\begin{document}
+
+\include{abstract}
+\include{acknowledgement}
+
+\include{intro}
+\include{model}
+\include{arch}
+\include{logical}
+\include{physical}
+%\include{deferred}
+\include{distributed}
+\include{garbage}
+\include{mapping}
+\include{relaxed}
+\include{resilience}
+\include{s3d}
+\include{related}
+\include{conclusion}
+
+\bibliographystyle{plainnat}
+\bibliography{bibliography}
+%\onlinesignature
+\end{document}
